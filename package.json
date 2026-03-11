@@ -1,6 +1,10 @@
 {
   "name": "bot_main",
   "module": "index.ts",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun run --watch index.ts"
+  },
   "type": "module",
   "private": true,
   "devDependencies": {

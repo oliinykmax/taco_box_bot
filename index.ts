@@ -34,8 +34,13 @@ bot.command("joke", (ctx) => {
 });
 
 bot.on("message:text", (ctx) => {
-  const text = ctx.message.text;
-  return ctx.reply(`Я отримав твоє повідомлення: ${text}`);
+  const text = ctx.message.text.toLowerCase();
+
+  if (text.includes("hello") || text.includes("привіт")) {
+    return ctx.reply("Привіт! Чим я можу тобі допомогти? 😊");
+  }
+
+  return ctx.reply(`Я отримав твоє повідомлення: ${ctx.message.text}`);
 });
 
 bot.start();
