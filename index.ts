@@ -1,5 +1,6 @@
 import { Bot, session, InlineKeyboard, type Context, type SessionFlavor } from "grammy";
 import "dotenv/config";
+import { initDB, saveUser, getUser, saveMeal, getTodayMeals } from "./database";
 import {
   calculateBMR,
   calculateTDEE,
@@ -9,8 +10,11 @@ import {
   activityDescriptions
 } from "./calculations";
 
+// Ініціалізація бази даних при запуску
+initDB();
+
 interface SessionData {
-  step: "idle" | "age" | "height" | "weight" | "sex" | "activity";
+  step: "idle" | "age" | "height" | "weight" | "sex" | "activity" | "add_meal";
   age?: number;
   height?: number;
   weight?: number;
@@ -36,7 +40,11 @@ bot.use(
 
 bot.command("start", (ctx) => {
   return ctx.reply(
-    "Привіт! Я твій новий Telegram-бот.\nЯ можу відповідати на команди та повторювати твої повідомлення.\nВикористовуй /set_profile для налаштування свого профілю та розрахунку калорій."
+    "Привіт! Я твій помічник для контролю калорій. 😊\n\n" +
+      "🔸 Використовуй /set_profile, щоб налаштувати свій профіль.\n" +
+      "🔸 Якщо ви вже налаштували профіль, ви можете переглянути його за допомогою /my_profile.\n" +
+      "🔸 Щоб записати прийом їжі, використовуй /add_meal.\n\n" +
+      "Використовуй /help, щоб побачити список усіх команд."
   );
 });
 
@@ -45,8 +53,59 @@ bot.command("set_profile", async (ctx) => {
   await ctx.reply("Введіть ваш вік:");
 });
 
+bot.command("add_meal", async (ctx) => {
+  ctx.session.step = "add_meal";
+  await ctx.reply("Що ви сьогодні їли?\n\n💡 Ви можете додати замітки через вертикальну риску, наприклад: `Яйця з тостом | без масла`", { parse_mode: "Markdown" });
+});
+
+bot.command("today", async (ctx) => {
+  const userId = ctx.from!.id;
+  const meals = getTodayMeals(userId);
+
+  if (meals.length === 0) {
+    return ctx.reply("Сьогодні ще немає записаних прийомів їжі. 🍽️");
+  }
+
+  let totalCalories = 0;
+  let message = "📅 Списокок страв за сьогодні:\n\n";
+
+  meals.forEach((meal, index) => {
+    const time = meal.time_str;
+    const notes = meal.notes ? `\n   📝 Нотатки: ${meal.notes}` : "";
+    message += `${index + 1}. 🕒 ${time} — *${meal.raw_text}*\n   🔥 ${meal.calories_estimated} kcal${notes}\n\n`;
+    totalCalories += meal.calories_estimated;
+  });
+
+  message += `\n📊 *Всього за день: ${totalCalories.toFixed(0)} kcal*`;
+
+  return ctx.reply(message, { parse_mode: "Markdown" });
+});
+
 bot.command("my_profile", async (ctx) => {
-  const { age, height, weight, sex, activity } = ctx.session;
+  let profile = ctx.session.age ? ctx.session : null;
+
+  // Якщо в сесії порожньо, спробуємо завантажити з БД
+  if (!profile) {
+    const dbUser = getUser(ctx.from!.id);
+    if (dbUser) {
+      profile = {
+        age: dbUser.age,
+        height: dbUser.height,
+        weight: dbUser.weight,
+        sex: dbUser.sex as Sex,
+        activity: dbUser.activity_level as ActivityLevel,
+        step: "idle"
+      };
+      // Оновимо сесію, щоб при наступних запитах брати звідти
+      ctx.session.age = dbUser.age;
+      ctx.session.height = dbUser.height;
+      ctx.session.weight = dbUser.weight;
+      ctx.session.sex = dbUser.sex as Sex;
+      ctx.session.activity = dbUser.activity_level as ActivityLevel;
+    }
+  }
+
+  const { age, height, weight, sex, activity } = profile || {};
 
   if (!age || !height || !weight || !sex || !activity) {
     return ctx.reply(
@@ -86,7 +145,14 @@ bot.command("my_profile", async (ctx) => {
 
 bot.command("help", (ctx) => {
   return ctx.reply(
-    "Доступні команди:\n/start - Почати роботу з ботом\n/help - Отримати список команд\n/joke - Цікавий факт або корисна інформація\n/set_profile - Налаштувати профіль та порахувати калорії\n/my_profile - Переглянути мій профіль"
+    "Доступні команди:\n" +
+      "/start - Почати роботу з ботом\n" +
+      "/help - Отримати список команд\n" +
+      "/joke - Цікавий факт або корисна інформація\n" +
+      "/set_profile - Налаштувати профіль та порахувати калорії\n" +
+      "/my_profile - Переглянути мій профіль\n" +
+      "/add_meal - Записати прийом їжі\n" +
+      "/today - Переглянути зʼїдене за сьогодні"
   );
 });
 
@@ -132,12 +198,24 @@ bot.on("callback_query:data", async (ctx) => {
         const bmr = calculateBMR(weight, height, age, sex);
         const tdee = calculateTDEE(bmr, activity);
 
+        // Збереження в базу даних
+        saveUser({
+          telegram_id: ctx.from!.id,
+          age,
+          weight,
+          height,
+          sex,
+          activity_level: activity,
+          bmr,
+          tdee,
+        });
+
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(
           `Ваші результати:\n` +
             `🔹 BMR (Базальний метаболізм): ${bmr.toFixed(2)} ккал\n` +
             `🔹 TDEE (Денна норма): ${tdee.toFixed(2)} ккал\n\n` +
-            `Дякуємо! Профіль налаштовано.`
+            `Дякуємо! Профіль налаштовано та збережено.`
         );
         ctx.session.step = "idle";
       } else {
@@ -186,6 +264,21 @@ bot.on("message:text", async (ctx) => {
       .text("Жінка", "female");
 
     return ctx.reply("Оберіть вашу стать:", { reply_markup: keyboard });
+  }
+
+  if (step === "add_meal") {
+    const parts = text.split("|").map(p => p.trim());
+    const foodName = parts[0] || ""; // Забезпечуємо, що це завжди string
+    const notes = parts.length > 1 ? parts[1] : undefined;
+
+    saveMeal({
+      user_id: ctx.from!.id,
+      raw_text: foodName,
+      calories_estimated: 0,
+      notes: notes,
+    });
+    ctx.session.step = "idle";
+    return ctx.reply("Прийом їжі збережено ✅");
   }
 
   if (text.toLowerCase().includes("hello") || text.toLowerCase().includes("привіт")) {
