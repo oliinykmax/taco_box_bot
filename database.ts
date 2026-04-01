@@ -43,6 +43,7 @@ export function initDB() {
     { table: "meals", column: "calories_estimated", type: "REAL" },
     { table: "meals", column: "timestamp", type: "DATETIME" },
     { table: "meals", column: "notes", type: "TEXT" },
+    { table: "meals", column: "gemini_json", type: "TEXT" },
   ];
 
   for (const m of migrations) {
@@ -102,17 +103,24 @@ export function saveMeal(meal: {
   raw_text: string;
   calories_estimated: number;
   notes?: string;
+  gemini_json?: string;
 }) {
   db.run(
-    `INSERT INTO meals (user_id, raw_text, calories_estimated, notes, timestamp)
-     VALUES (?, ?, ?, ?, datetime('now'))`,
-    [meal.user_id, meal.raw_text, meal.calories_estimated, meal.notes || null]
+    `INSERT INTO meals (user_id, raw_text, calories_estimated, notes, gemini_json, timestamp)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))`,
+    [
+      meal.user_id,
+      meal.raw_text,
+      meal.calories_estimated,
+      meal.notes || null,
+      meal.gemini_json || null,
+    ]
   );
 }
 
 export function getTodayMeals(user_id: number) {
   const query = db.prepare(
-    "SELECT *, time(timestamp, 'localtime') as time_str FROM meals WHERE user_id = ? AND date(timestamp) = date('now')"
+    "SELECT *, time(timestamp, 'localtime') as time_str FROM meals WHERE user_id = ? AND date(timestamp, 'localtime') = date('now', 'localtime')"
   );
   return query.all(user_id) as {
     id: number;
@@ -120,9 +128,17 @@ export function getTodayMeals(user_id: number) {
     raw_text: string;
     calories_estimated: number;
     notes: string | null;
+    gemini_json: string | null;
     timestamp: string;
     time_str: string;
   }[];
+}
+
+export function clearTodayMeals(user_id: number) {
+  db.run(
+    "DELETE FROM meals WHERE user_id = ? AND date(timestamp, 'localtime') = date('now', 'localtime')",
+    [user_id]
+  );
 }
 
 export default db;

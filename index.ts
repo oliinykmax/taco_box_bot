@@ -1,6 +1,7 @@
 import { Bot, session, InlineKeyboard, type Context, type SessionFlavor } from "grammy";
 import "dotenv/config";
-import { initDB, saveUser, getUser, saveMeal, getTodayMeals } from "./database";
+import { initDB, saveUser, getUser, saveMeal, getTodayMeals, clearTodayMeals } from "./database";
+import { estimateCalories } from "./gemini";
 import {
   calculateBMR,
   calculateTDEE,
@@ -61,24 +62,42 @@ bot.command("add_meal", async (ctx) => {
 bot.command("today", async (ctx) => {
   const userId = ctx.from!.id;
   const meals = getTodayMeals(userId);
+  const user = getUser(userId);
 
   if (meals.length === 0) {
     return ctx.reply("Сьогодні ще немає записаних прийомів їжі. 🍽️");
   }
 
   let totalCalories = 0;
-  let message = "📅 Списокок страв за сьогодні:\n\n";
+  let message = "📅 <b>Ваш раціон за сьогодні:</b>\n\n";
 
   meals.forEach((meal, index) => {
     const time = meal.time_str;
-    const notes = meal.notes ? `\n   📝 Нотатки: ${meal.notes}` : "";
-    message += `${index + 1}. 🕒 ${time} — *${meal.raw_text}*\n   🔥 ${meal.calories_estimated} kcal${notes}\n\n`;
+    const notes = meal.notes ? ` <i>(${meal.notes})</i>` : "";
+    message += `${index + 1}. 🕒 ${time} — <b>${meal.raw_text}</b>${notes}\n   🔥 ${meal.calories_estimated} kcal\n\n`;
     totalCalories += meal.calories_estimated;
   });
 
-  message += `\n📊 *Всього за день: ${totalCalories.toFixed(0)} kcal*`;
+  message += `📊 <b>Всього за день: ${totalCalories.toFixed(0)} kcal</b>\n`;
 
-  return ctx.reply(message, { parse_mode: "Markdown" });
+  if (user && user.tdee) {
+    const remaining = user.tdee - totalCalories;
+    const percent = (totalCalories / user.tdee) * 100;
+    
+    message += `🎯 Ваша норма: <b>${user.tdee.toFixed(0)} kcal</b>\n\n`;
+    
+    if (remaining > 0) {
+      message += `✅ Ви спожили <b>${percent.toFixed(0)}%</b> від норми.\n`;
+      message += `💡 Можна з'їсти ще <b>${remaining.toFixed(0)} kcal</b>.`;
+    } else {
+      message += `⚠️ <b>Норма перевищена на ${Math.abs(remaining).toFixed(0)} kcal!</b> 😱\n`;
+      message += `🏃 Час для невеликої прогулянки або тренування.`;
+    }
+  } else {
+    message += `\n💡 <i>Налаштуйте профіль (/set_profile), щоб бачити персональну норму калорій.</i>`;
+  }
+
+  return ctx.reply(message, { parse_mode: "HTML" });
 });
 
 bot.command("my_profile", async (ctx) => {
@@ -145,15 +164,28 @@ bot.command("my_profile", async (ctx) => {
 
 bot.command("help", (ctx) => {
   return ctx.reply(
-    "Доступні команди:\n" +
-      "/start - Почати роботу з ботом\n" +
-      "/help - Отримати список команд\n" +
-      "/joke - Цікавий факт або корисна інформація\n" +
-      "/set_profile - Налаштувати профіль та порахувати калорії\n" +
-      "/my_profile - Переглянути мій профіль\n" +
-      "/add_meal - Записати прийом їжі\n" +
-      "/today - Переглянути зʼїдене за сьогодні"
+    "🆘 <b>Доступні команди:</b>\n\n" +
+      "🔹 /start — Почати роботу з ботом\n" +
+      "🔹 /help — Отримати список команд\n" +
+      "🔹 /joke — Цікавий факт про їжу 💡\n" +
+      "🔹 /set_profile — Налаштувати профіль ⚙️\n" +
+      "🔹 /my_profile — Мій профіль 📋\n" +
+      "🔹 /add_meal — Записати прийом їжі 🍽️\n" +
+      "🔹 /today — Зʼїдене за сьогодні 📅\n" +
+      "🔹 /clear_today — Очистити список за сьогодні 🗑️",
+    { parse_mode: "HTML" }
   );
+});
+
+bot.command("clear_today", async (ctx) => {
+  const keyboard = new InlineKeyboard()
+    .text("✅ Так, очистити", "confirm_clear")
+    .text("❌ Скасувати", "cancel_clear");
+
+  await ctx.reply("⚠️ <b>Ви впевнені, що хочете видалити всі записи за сьогодні?</b>", {
+    reply_markup: keyboard,
+    parse_mode: "HTML",
+  });
 });
 
 bot.command("joke", (ctx) => {
@@ -170,6 +202,17 @@ bot.command("joke", (ctx) => {
 
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
+
+  if (data === "confirm_clear") {
+    clearTodayMeals(ctx.from!.id);
+    await ctx.answerCallbackQuery("Дані за сьогодні видалено! 🗑️");
+    return ctx.editMessageText("✅ <b>Всі записи за сьогодні успішно видалено.</b>", { parse_mode: "HTML" });
+  }
+
+  if (data === "cancel_clear") {
+    await ctx.answerCallbackQuery("Дію скасовано. 🙂");
+    return ctx.editMessageText("👌 <b>Видалення скасовано. Ваші записи в безпеці!</b>", { parse_mode: "HTML" });
+  }
 
   if (ctx.session.step === "sex") {
     if (data === "male" || data === "female") {
@@ -271,14 +314,34 @@ bot.on("message:text", async (ctx) => {
     const foodName = parts[0] || ""; // Забезпечуємо, що це завжди string
     const notes = parts.length > 1 ? parts[1] : undefined;
 
+    await ctx.reply("⌛ Оцінюю калорії за допомогою Gemini...");
+    
+    const mealData = await estimateCalories(text);
+
+    if (!mealData || mealData.total_calories === 0) {
+      ctx.session.step = "idle";
+      return ctx.reply("Не вдалося проаналізувати їжу. Спробуйте описати простіше.");
+    }
+
     saveMeal({
       user_id: ctx.from!.id,
       raw_text: foodName,
-      calories_estimated: 0,
+      calories_estimated: mealData.total_calories,
       notes: notes,
+      gemini_json: JSON.stringify(mealData),
     });
     ctx.session.step = "idle";
-    return ctx.reply("Прийом їжі збережено ✅");
+    
+    const itemsText = mealData.items.map(item => `• ${item.name} — ${item.calories} kcal`).join("\n");
+
+    return ctx.reply(
+      `<b>Знайдено:</b>\n\n` +
+      `${itemsText}\n\n` +
+      `<b>Всього: ${mealData.total_calories} kcal</b>\n` +
+      `Точність: ${mealData.confidence.toFixed(2)}\n\n` +
+      `<i>Примітка: це орієнтовна оцінка калорій.</i>`,
+      { parse_mode: "HTML" }
+    );
   }
 
   if (text.toLowerCase().includes("hello") || text.toLowerCase().includes("привіт")) {
