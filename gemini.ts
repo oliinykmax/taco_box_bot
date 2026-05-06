@@ -53,35 +53,43 @@ export async function estimateCalories(mealText: string): Promise<MealEstimation
     If the input is in Ukrainian, use Ukrainian for product names.
   `;
 
-  try {
-    console.log(`[Gemini] Estimating: "${mealText}"`);
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text().trim();
-    const data = JSON.parse(text);
+  const makeRequest = async (attempt: number): Promise<MealEstimation | null> => {
+    try {
+      console.log(`[Gemini] Attempt ${attempt} for: "${mealText}"`);
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const text = response.text().trim();
+      const data = JSON.parse(text);
 
-    if (
-      data &&
-      Array.isArray(data.items) &&
-      typeof data.total_calories === "number" &&
-      typeof data.confidence === "number"
-    ) {
-      console.log(`[Gemini] Success: ${data.total_calories} kcal (Confidence: ${data.confidence})`);
-      return data as MealEstimation;
-    }
+      if (
+        data &&
+        Array.isArray(data.items) &&
+        typeof data.total_calories === "number" &&
+        typeof data.confidence === "number"
+      ) {
+        console.log(`[Gemini] Success on attempt ${attempt}: ${data.total_calories} kcal`);
+        return data as MealEstimation;
+      }
 
-    console.error("[Gemini] Invalid JSON structure received:", data);
-    return null;
-  } catch (error: any) {
-    if (error.status === 429) {
-      console.error("[Gemini] Quota Exceeded (429). Check your billing or wait a minute.");
-    } else if (error.status === 404) {
-      console.error("[Gemini] Model not found (404). Check the model name.");
-    } else {
-      console.error("[Gemini] Unexpected Error:", error.message || error);
+      console.error(`[Gemini] Invalid JSON structure on attempt ${attempt}:`, data);
+      return null;
+    } catch (error: any) {
+      console.error(`[Gemini] Error on attempt ${attempt}:`, error.message || error);
+      return null;
     }
-    return null;
+  };
+
+  // Перша спроба
+  let result = await makeRequest(1);
+  
+  // Якщо не вдалося, пробуємо ще раз через 1 секунду
+  if (!result) {
+    console.log("[Gemini] Retrying in 1 second...");
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    result = await makeRequest(2);
   }
+
+  return result;
 }
 
 // Оновлений тест

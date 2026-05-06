@@ -1,4 +1,4 @@
-import { Bot, session, InlineKeyboard, type Context, type SessionFlavor } from "grammy";
+import { Bot, session, InlineKeyboard, Keyboard, type Context, type SessionFlavor } from "grammy";
 import "dotenv/config";
 import { initDB, saveUser, getUser, saveMeal, getTodayMeals, clearTodayMeals } from "./database";
 import { estimateCalories } from "./gemini";
@@ -33,11 +33,34 @@ if (!token) {
 
 const bot = new Bot<MyContext>(token);
 
+// Простий Rate Limiter (в пам'яті)
+const userLastMessageTime = new Map<number, number>();
+
+bot.use(async (ctx, next) => {
+  const userId = ctx.from?.id;
+  if (userId) {
+    const now = Date.now();
+    const lastTime = userLastMessageTime.get(userId) || 0;
+    if (now - lastTime < 1000) { // 1 секунда
+      return ctx.reply("⏳ Ви надсилаєте запити занадто швидко. Будь ласка, зачекайте секунду.");
+    }
+    userLastMessageTime.set(userId, now);
+  }
+  await next();
+});
+
 bot.use(
   session({
     initial: (): SessionData => ({ step: "idle" }),
   })
 );
+
+const mainMenu = new Keyboard()
+  .text("➕ Add meal")
+  .text("📊 Today")
+  .row()
+  .text("⚙️ Set profile")
+  .resized();
 
 bot.command("start", (ctx) => {
   return ctx.reply(
@@ -45,121 +68,166 @@ bot.command("start", (ctx) => {
       "🔸 Використовуй /set_profile, щоб налаштувати свій профіль.\n" +
       "🔸 Якщо ви вже налаштували профіль, ви можете переглянути його за допомогою /my_profile.\n" +
       "🔸 Щоб записати прийом їжі, використовуй /add_meal.\n\n" +
-      "Використовуй /help, щоб побачити список усіх команд."
+      "Використовуй /help, щоб побачити список усіх команд.",
+    {
+      reply_markup: mainMenu,
+    }
   );
 });
 
-bot.command("set_profile", async (ctx) => {
-  ctx.session.step = "age";
-  await ctx.reply("Введіть ваш вік:");
+// Глобальний обробник помилок
+bot.catch((err) => {
+  const ctx = err.ctx;
+  console.error(`Error while handling update ${ctx.update.update_id}:`);
+  console.error(err.error);
+  ctx.reply("Сталася помилка. Спробуйте ще раз пізніше.").catch(e => console.error("Failed to send error message:", e));
 });
 
-bot.command("add_meal", async (ctx) => {
-  ctx.session.step = "add_meal";
-  await ctx.reply("Що ви сьогодні їли?\n\n💡 Ви можете додати замітки через вертикальну риску, наприклад: `Яйця з тостом | без масла`", { parse_mode: "Markdown" });
-});
-
-bot.command("today", async (ctx) => {
-  const userId = ctx.from!.id;
-  const meals = getTodayMeals(userId);
-  const user = getUser(userId);
-
-  if (meals.length === 0) {
-    return ctx.reply("Сьогодні ще немає записаних прийомів їжі. 🍽️");
+const setProfileHandler = async (ctx: MyContext) => {
+  try {
+    ctx.session.step = "age";
+    await ctx.reply(
+      "1️⃣ <b>Крок 1: Вік</b>\n\n" +
+        "Будь ласка, введіть ваш вік у роках (наприклад: 25).\n" +
+        "Це допоможе нам розрахувати базовий метаболізм.",
+      { parse_mode: "HTML" }
+    );
+  } catch (error) {
+    console.error("Error in setProfileHandler:", error);
+    await ctx.reply("Сталася помилка. Спробуйте ще раз пізніше.");
   }
+};
 
-  let totalCalories = 0;
-  let message = "📅 <b>Ваш раціон за сьогодні:</b>\n\n";
+bot.command("set_profile", setProfileHandler);
+bot.hears("⚙️ Set profile", setProfileHandler);
 
-  meals.forEach((meal, index) => {
-    const time = meal.time_str;
-    const notes = meal.notes ? ` <i>(${meal.notes})</i>` : "";
-    message += `${index + 1}. 🕒 ${time} — <b>${meal.raw_text}</b>${notes}\n   🔥 ${meal.calories_estimated} kcal\n\n`;
-    totalCalories += meal.calories_estimated;
-  });
+const addMealHandler = async (ctx: MyContext) => {
+  try {
+    ctx.session.step = "add_meal";
+    await ctx.reply("Що ви їли?");
+  } catch (error) {
+    console.error("Error in addMealHandler:", error);
+    await ctx.reply("Сталася помилка. Спробуйте ще раз пізніше.");
+  }
+};
 
-  message += `📊 <b>Всього за день: ${totalCalories.toFixed(0)} kcal</b>\n`;
+bot.command("add_meal", addMealHandler);
+bot.hears("➕ Add meal", addMealHandler);
 
-  if (user && user.tdee) {
-    const remaining = user.tdee - totalCalories;
-    const percent = (totalCalories / user.tdee) * 100;
-    
-    message += `🎯 Ваша норма: <b>${user.tdee.toFixed(0)} kcal</b>\n\n`;
-    
-    if (remaining > 0) {
-      message += `✅ Ви спожили <b>${percent.toFixed(0)}%</b> від норми.\n`;
-      message += `💡 Можна з'їсти ще <b>${remaining.toFixed(0)} kcal</b>.`;
-    } else {
-      message += `⚠️ <b>Норма перевищена на ${Math.abs(remaining).toFixed(0)} kcal!</b> 😱\n`;
-      message += `🏃 Час для невеликої прогулянки або тренування.`;
+const todayHandler = async (ctx: MyContext) => {
+  try {
+    const userId = ctx.from!.id;
+    const meals = getTodayMeals(userId);
+    const user = getUser(userId);
+
+    if (meals.length === 0) {
+      return ctx.reply("Сьогодні ще немає записаних прийомів їжі. 🍽️");
     }
-  } else {
-    message += `\n💡 <i>Налаштуйте профіль (/set_profile), щоб бачити персональну норму калорій.</i>`;
-  }
 
-  return ctx.reply(message, { parse_mode: "HTML" });
-});
+    let totalCalories = 0;
+    let message = "📅 <b>Ваш раціон за сьогодні:</b>\n\n";
+
+    meals.forEach((meal, index) => {
+      const time = meal.time_str;
+      const notes = meal.notes ? ` <i>(${meal.notes})</i>` : "";
+      message += `${index + 1}. 🕒 ${time} — <b>${meal.raw_text}</b>${notes}\n   🔥 ${meal.calories_estimated} kcal\n\n`;
+      totalCalories += meal.calories_estimated;
+    });
+
+    message += `📊 <b>Всього за день: ${totalCalories.toFixed(0)} kcal</b>\n`;
+
+    if (user && user.tdee) {
+      const remaining = user.tdee - totalCalories;
+      const percent = (totalCalories / user.tdee) * 100;
+      
+      message += `🎯 Ваша норма: <b>${user.tdee.toFixed(0)} kcal</b>\n\n`;
+      
+      if (remaining > 0) {
+        message += `✅ Ви спожили <b>${percent.toFixed(0)}%</b> від норми.\n`;
+        message += `💡 Можна з'їсти ще <b>${remaining.toFixed(0)} kcal</b>.`;
+      } else {
+        message += `⚠️ <b>Норма перевищена на ${Math.abs(remaining).toFixed(0)} kcal!</b> 😱\n`;
+        message += `🏃 Час для невеликої прогулянки або тренування.`;
+      }
+    } else {
+      message += `\n💡 <i>Налаштуйте профіль (/set_profile), щоб бачити персональну норму калорій.</i>`;
+    }
+
+    return ctx.reply(message, { parse_mode: "HTML" });
+  } catch (error) {
+    console.error("Error in todayHandler:", error);
+    await ctx.reply("Сталася помилка. Спробуйте ще раз пізніше.");
+  }
+};
+
+bot.command("today", todayHandler);
+bot.hears("📊 Today", todayHandler);
 
 bot.command("my_profile", async (ctx) => {
-  let profile = ctx.session.age ? ctx.session : null;
+  try {
+    let profile = ctx.session.age ? ctx.session : null;
 
-  // Якщо в сесії порожньо, спробуємо завантажити з БД
-  if (!profile) {
-    const dbUser = getUser(ctx.from!.id);
-    if (dbUser) {
-      profile = {
-        age: dbUser.age,
-        height: dbUser.height,
-        weight: dbUser.weight,
-        sex: dbUser.sex as Sex,
-        activity: dbUser.activity_level as ActivityLevel,
-        step: "idle"
-      };
-      // Оновимо сесію, щоб при наступних запитах брати звідти
-      ctx.session.age = dbUser.age;
-      ctx.session.height = dbUser.height;
-      ctx.session.weight = dbUser.weight;
-      ctx.session.sex = dbUser.sex as Sex;
-      ctx.session.activity = dbUser.activity_level as ActivityLevel;
+    // Якщо в сесії порожньо, спробуємо завантажити з БД
+    if (!profile) {
+      const dbUser = getUser(ctx.from!.id);
+      if (dbUser) {
+        profile = {
+          age: dbUser.age,
+          height: dbUser.height,
+          weight: dbUser.weight,
+          sex: dbUser.sex as Sex,
+          activity: dbUser.activity_level as ActivityLevel,
+          step: "idle"
+        };
+        // Оновимо сесію, щоб при наступних запитах брати звідти
+        ctx.session.age = dbUser.age;
+        ctx.session.height = dbUser.height;
+        ctx.session.weight = dbUser.weight;
+        ctx.session.sex = dbUser.sex as Sex;
+        ctx.session.activity = dbUser.activity_level as ActivityLevel;
+      }
     }
-  }
 
-  const { age, height, weight, sex, activity } = profile || {};
+    const { age, height, weight, sex, activity } = profile || {};
 
-  if (!age || !height || !weight || !sex || !activity) {
+    if (!age || !height || !weight || !sex || !activity) {
+      return ctx.reply(
+        "Ваш профіль ще не налаштовано. Використовуйте /set_profile, щоб ввести дані."
+      );
+    }
+
+    const bmr = calculateBMR(weight, height, age, sex);
+    const tdee = calculateTDEE(bmr, activity);
+
+    const sexEmoji = sex === "male" ? "👨 Чоловік" : "👩 Жінка";
+    const activityLabels: Record<ActivityLevel, string> = {
+      low: "Низький (1.2)",
+      light: "Легкий (1.375)",
+      medium: "Середній (1.55)",
+      high: "Високий (1.725)",
+    };
+
+    const activityDesc = activityDescriptions[activity];
+
     return ctx.reply(
-      "Ваш профіль ще не налаштовано. Використовуйте /set_profile, щоб ввести дані."
+      `📋 Ваш профіль:\n\n` +
+        `🎂 Вік: ${age}\n` +
+        `📏 Зріст: ${height} см\n` +
+        `⚖️ Вага: ${weight} кг\n` +
+        `🚻 Стать: ${sexEmoji}\n` +
+        `🏃 Активність: ${activityLabels[activity]}\n` +
+        `ℹ️ Опис: ${activityDesc}\n\n` +
+        `🔥 BMR (метаболізм у спокої): ${bmr.toFixed(0)} ккал\n` +
+        `⚡ TDEE (денна норма): ${tdee.toFixed(0)} ккал\n\n` +
+        `💡 Рекомендації для вашої мети:\n` +
+        `📉 Схуднення: ${(tdee * 0.85).toFixed(0)} ккал (-15%)\n` +
+        `⚖️ Підтримка ваги: ${tdee.toFixed(0)} ккал\n` +
+        `📈 Набір маси: ${(tdee * 1.15).toFixed(0)} ккал (+15%)`
     );
+  } catch (error) {
+    console.error("Error in my_profile command:", error);
+    await ctx.reply("Сталася помилка. Спробуйте ще раз пізніше.");
   }
-
-  const bmr = calculateBMR(weight, height, age, sex);
-  const tdee = calculateTDEE(bmr, activity);
-
-  const sexEmoji = sex === "male" ? "👨 Чоловік" : "👩 Жінка";
-  const activityLabels: Record<ActivityLevel, string> = {
-    low: "Низький (1.2)",
-    light: "Легкий (1.375)",
-    medium: "Середній (1.55)",
-    high: "Високий (1.725)",
-  };
-
-  const activityDesc = activityDescriptions[activity];
-
-  return ctx.reply(
-    `📋 Ваш профіль:\n\n` +
-      `🎂 Вік: ${age}\n` +
-      `📏 Зріст: ${height} см\n` +
-      `⚖️ Вага: ${weight} кг\n` +
-      `🚻 Стать: ${sexEmoji}\n` +
-      `🏃 Активність: ${activityLabels[activity]}\n` +
-      `ℹ️ Опис: ${activityDesc}\n\n` +
-      `🔥 BMR (метаболізм у спокої): ${bmr.toFixed(0)} ккал\n` +
-      `⚡ TDEE (денна норма): ${tdee.toFixed(0)} ккал\n\n` +
-      `💡 Рекомендації для вашої мети:\n` +
-      `📉 Схуднення: ${(tdee * 0.85).toFixed(0)} ккал (-15%)\n` +
-      `⚖️ Підтримка ваги: ${tdee.toFixed(0)} ккал\n` +
-      `📈 Набір маси: ${(tdee * 1.15).toFixed(0)} ккал (+15%)`
-  );
 });
 
 bot.command("help", (ctx) => {
@@ -220,15 +288,22 @@ bot.on("callback_query:data", async (ctx) => {
       ctx.session.step = "activity";
 
       const keyboard = new InlineKeyboard()
-        .text("Низький (low)", "low")
-        .text("Легкий (light)", "light")
+        .text("Низький", "low")
+        .text("Легкий", "light")
         .row()
-        .text("Середній (medium)", "medium")
-        .text("Високий (high)", "high");
+        .text("Середній", "medium")
+        .text("Високий", "high");
+
+      let activityText = "5️⃣ <b>Крок 5: Рівень активності</b>\n\nОберіть ваш рівень фізичної активності:\n\n";
+      for (const [key, desc] of Object.entries(activityDescriptions)) {
+        const label = key === "low" ? "Низький" : key === "light" ? "Легкий" : key === "medium" ? "Середній" : "Високий";
+        activityText += `🔹 <b>${label}</b>: ${desc}\n`;
+      }
 
       await ctx.answerCallbackQuery();
-      await ctx.editMessageText("Оберіть ваш рівень активності:", {
+      await ctx.editMessageText(activityText, {
         reply_markup: keyboard,
+        parse_mode: "HTML",
       });
     }
   } else if (ctx.session.step === "activity") {
@@ -255,10 +330,11 @@ bot.on("callback_query:data", async (ctx) => {
 
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(
-          `Ваші результати:\n` +
-            `🔹 BMR (Базальний метаболізм): ${bmr.toFixed(2)} ккал\n` +
-            `🔹 TDEE (Денна норма): ${tdee.toFixed(2)} ккал\n\n` +
-            `Дякуємо! Профіль налаштовано та збережено.`
+          `🎉 <b>Профіль успішно налаштовано!</b>\n\n` +
+            `🔹 BMR (Базальний метаболізм): <b>${bmr.toFixed(0)} ккал</b>\n` +
+            `🔹 TDEE (Денна норма): <b>${tdee.toFixed(0)} ккал</b>\n\n` +
+            `Тепер ви можете додавати прийоми їжі за допомогою кнопки <b>➕ Add meal</b>.`,
+          { parse_mode: "HTML" }
         );
         ctx.session.step = "idle";
       } else {
@@ -277,36 +353,48 @@ bot.on("message:text", async (ctx) => {
   if (step === "age") {
     const age = parseInt(text);
     if (isNaN(age) || age < 10 || age > 100) {
-      return ctx.reply("Будь ласка, введіть коректний вік (число від 10 до 100):");
+      return ctx.reply("Будь ласка, введіть вік від 10 до 100 років.");
     }
     ctx.session.age = age;
     ctx.session.step = "height";
-    return ctx.reply("Введіть ваш зріст (см):");
+    return ctx.reply(
+      "2️⃣ <b>Крок 2: Зріст</b>\n\n" +
+      "Введіть ваш зріст у сантиметрах (наприклад: 175).",
+      { parse_mode: "HTML" }
+    );
   }
 
   if (step === "height") {
     const height = parseFloat(text);
     if (isNaN(height) || height < 100 || height > 250) {
-      return ctx.reply("Будь ласка, введіть коректний зріст (число від 100 до 250):");
+      return ctx.reply("Будь ласка, введіть зріст від 100 до 250 см.");
     }
     ctx.session.height = height;
     ctx.session.step = "weight";
-    return ctx.reply("Введіть вашу вагу (кг):");
+    return ctx.reply(
+      "3️⃣ <b>Крок 3: Вага</b>\n\n" +
+      "Введіть вашу вагу в кілограмах (наприклад: 70.5).",
+      { parse_mode: "HTML" }
+    );
   }
 
   if (step === "weight") {
     const weight = parseFloat(text);
     if (isNaN(weight) || weight < 30 || weight > 300) {
-      return ctx.reply("Будь ласка, введіть коректну вагу (число від 30 до 300):");
+      return ctx.reply("Будь ласка, введіть вагу від 30 до 300 кг.");
     }
     ctx.session.weight = weight;
     ctx.session.step = "sex";
 
     const keyboard = new InlineKeyboard()
-      .text("Чоловік", "male")
-      .text("Жінка", "female");
+      .text("Чоловік 👨", "male")
+      .text("Жінка 👩", "female");
 
-    return ctx.reply("Оберіть вашу стать:", { reply_markup: keyboard });
+    return ctx.reply(
+      "4️⃣ <b>Крок 4: Стать</b>\n\n" +
+      "Оберіть вашу стать для точнішого розрахунку метаболізму:",
+      { reply_markup: keyboard, parse_mode: "HTML" }
+    );
   }
 
   if (step === "add_meal") {
@@ -340,7 +428,7 @@ bot.on("message:text", async (ctx) => {
       `<b>Всього: ${mealData.total_calories} kcal</b>\n` +
       `Точність: ${mealData.confidence.toFixed(2)}\n\n` +
       `<i>Примітка: це орієнтовна оцінка калорій.</i>`,
-      { parse_mode: "HTML" }
+      { parse_mode: "HTML", reply_markup: mainMenu }
     );
   }
 
