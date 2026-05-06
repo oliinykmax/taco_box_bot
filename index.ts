@@ -1,12 +1,14 @@
 import { Bot, session, InlineKeyboard, Keyboard, type Context, type SessionFlavor } from "grammy";
 import "dotenv/config";
 import { initDB, saveUser, getUser, saveMeal, getTodayMeals, clearTodayMeals } from "./database";
-import { estimateCalories } from "./gemini";
+import { estimateCalories, getMealIdeas } from "./gemini";
 import {
   calculateBMR,
   calculateTDEE,
+  calculateRecommendedCalories,
   type Sex,
   type ActivityLevel,
+  type Goal,
   activityMultipliers,
   activityDescriptions
 } from "./calculations";
@@ -15,13 +17,20 @@ import {
 initDB();
 
 interface SessionData {
-  step: "idle" | "age" | "height" | "weight" | "sex" | "activity" | "add_meal";
+  step: "idle" | "age" | "height" | "weight" | "sex" | "activity" | "goal" | "add_meal";
   age?: number;
   height?: number;
   weight?: number;
   sex?: Sex;
   activity?: ActivityLevel;
+  goal?: Goal;
 }
+
+const goalLabels: Record<Goal, string> = {
+  lose: "🔻 Схуднення",
+  maintain: "⚖️ Підтримка",
+  gain: "🔺 Набір маси",
+};
 
 type MyContext = Context & SessionFlavor<SessionData>;
 
@@ -59,6 +68,7 @@ const mainMenu = new Keyboard()
   .text("➕ Add meal")
   .text("📊 Today")
   .row()
+  .text("📋 Plan")
   .text("⚙️ Set profile")
   .resized();
 
@@ -136,11 +146,12 @@ const todayHandler = async (ctx: MyContext) => {
 
     message += `📊 <b>Всього за день: ${totalCalories.toFixed(0)} kcal</b>\n`;
 
-    if (user && user.tdee) {
-      const remaining = user.tdee - totalCalories;
-      const percent = (totalCalories / user.tdee) * 100;
+    if (user && user.tdee && user.goal) {
+      const targetCalories = calculateRecommendedCalories(user.tdee, user.goal as Goal);
+      const remaining = targetCalories - totalCalories;
+      const percent = (totalCalories / targetCalories) * 100;
       
-      message += `🎯 Ваша норма: <b>${user.tdee.toFixed(0)} kcal</b>\n\n`;
+      message += `🎯 Ваша ціль (${goalLabels[user.goal as Goal]}): <b>${targetCalories.toFixed(0)} kcal</b>\n\n`;
       
       if (remaining > 0) {
         message += `✅ Ви спожили <b>${percent.toFixed(0)}%</b> від норми.\n`;
@@ -149,8 +160,10 @@ const todayHandler = async (ctx: MyContext) => {
         message += `⚠️ <b>Норма перевищена на ${Math.abs(remaining).toFixed(0)} kcal!</b> 😱\n`;
         message += `🏃 Час для невеликої прогулянки або тренування.`;
       }
-    } else {
-      message += `\n💡 <i>Налаштуйте профіль (/set_profile), щоб бачити персональну норму калорій.</i>`;
+    } else if (!user || !user.age || !user.height || !user.weight || !user.sex || !user.activity_level) {
+      message += `\n💡 <i>Спочатку заповніть профіль через /set_profile</i>`;
+    } else if (!user.goal) {
+      message += `\n💡 <i>Оновіть профіль і виберіть вашу ціль за допомогою /set_profile</i>`;
     }
 
     return ctx.reply(message, { parse_mode: "HTML" });
@@ -162,6 +175,57 @@ const todayHandler = async (ctx: MyContext) => {
 
 bot.command("today", todayHandler);
 bot.hears("📊 Today", todayHandler);
+
+const planHandler = async (ctx: MyContext) => {
+  try {
+    const userId = ctx.from!.id;
+    const user = getUser(userId);
+
+    if (!user || !user.age || !user.height || !user.weight || !user.sex || !user.activity_level) {
+      return ctx.reply("Спочатку заповніть профіль через /set_profile 😊");
+    }
+
+    if (!user.goal) {
+      return ctx.reply("Оновіть профіль і виберіть вашу ціль за допомогою /set_profile 🎯");
+    }
+
+    const targetCalories = calculateRecommendedCalories(user.tdee, user.goal as Goal);
+    const goalName = goalLabels[user.goal as Goal];
+    
+    let explanation = "";
+    if (user.goal === "lose") {
+      explanation = "Це помірний дефіцит калорій для поступового зниження ваги без стресу для організму.";
+    } else if (user.goal === "maintain") {
+      explanation = "Ця кількість калорій дозволить вам підтримувати поточну вагу при вашому рівні активності.";
+    } else if (user.goal === "gain") {
+      explanation = "Це невеликий профіцит калорій для якісного набору м'язової маси разом з тренуваннями.";
+    }
+
+    await ctx.reply(
+      `📋 <b>Ваш персональний план:</b>\n\n` +
+      `🎯 Ваша ціль: <b>${goalName}</b>\n\n` +
+      `🔥 Рекомендації:\n` +
+      `<b>${targetCalories.toFixed(0)} kcal / день</b>\n\n` +
+      `💡 ${explanation}\n\n` +
+      `⌛ <i>Генерую ідеї страв...</i>`,
+      { parse_mode: "HTML" }
+    );
+
+    const mealIdeas = await getMealIdeas(goalName, targetCalories);
+
+    return ctx.reply(
+      `<b>Ідеї страв:</b>\n${mealIdeas}\n\n` +
+      `⚠️ <i>Це загальні рекомендації, а не медична порада.</i>`,
+      { parse_mode: "HTML" }
+    );
+  } catch (error) {
+    console.error("Error in planHandler:", error);
+    await ctx.reply("Сталася помилка. Спробуйте ще раз пізніше.");
+  }
+};
+
+bot.command("plan", planHandler);
+bot.hears("📋 Plan", planHandler);
 
 bot.command("my_profile", async (ctx) => {
   try {
@@ -177,6 +241,7 @@ bot.command("my_profile", async (ctx) => {
           weight: dbUser.weight,
           sex: dbUser.sex as Sex,
           activity: dbUser.activity_level as ActivityLevel,
+          goal: dbUser.goal as Goal,
           step: "idle"
         };
         // Оновимо сесію, щоб при наступних запитах брати звідти
@@ -185,14 +250,21 @@ bot.command("my_profile", async (ctx) => {
         ctx.session.weight = dbUser.weight;
         ctx.session.sex = dbUser.sex as Sex;
         ctx.session.activity = dbUser.activity_level as ActivityLevel;
+        ctx.session.goal = dbUser.goal as Goal;
       }
     }
 
-    const { age, height, weight, sex, activity } = profile || {};
+    const { age, height, weight, sex, activity, goal } = profile || {};
 
     if (!age || !height || !weight || !sex || !activity) {
       return ctx.reply(
-        "Ваш профіль ще не налаштовано. Використовуйте /set_profile, щоб ввести дані."
+        "Спочатку заповніть профіль через /set_profile 😊"
+      );
+    }
+
+    if (!goal) {
+      return ctx.reply(
+        "Оновіть профіль і виберіть вашу ціль за допомогою /set_profile 🎯"
       );
     }
 
@@ -216,6 +288,7 @@ bot.command("my_profile", async (ctx) => {
         `⚖️ Вага: ${weight} кг\n` +
         `🚻 Стать: ${sexEmoji}\n` +
         `🏃 Активність: ${activityLabels[activity]}\n` +
+        `🎯 Ціль: ${goalLabels[goal]}\n` +
         `ℹ️ Опис: ${activityDesc}\n\n` +
         `🔥 BMR (метаболізм у спокої): ${bmr.toFixed(0)} ккал\n` +
         `⚡ TDEE (денна норма): ${tdee.toFixed(0)} ккал\n\n` +
@@ -238,6 +311,7 @@ bot.command("help", (ctx) => {
       "🔹 /joke — Цікавий факт про їжу 💡\n" +
       "🔹 /set_profile — Налаштувати профіль ⚙️\n" +
       "🔹 /my_profile — Мій профіль 📋\n" +
+      "🔹 /plan — Мій план харчування 🥗\n" +
       "🔹 /add_meal — Записати прийом їжі 🍽️\n" +
       "🔹 /today — Зʼїдене за сьогодні 📅\n" +
       "🔹 /clear_today — Очистити список за сьогодні 🗑️",
@@ -309,10 +383,27 @@ bot.on("callback_query:data", async (ctx) => {
   } else if (ctx.session.step === "activity") {
     if (["low", "light", "medium", "high"].includes(data)) {
       ctx.session.activity = data as ActivityLevel;
+      ctx.session.step = "goal";
 
-      const { weight, height, age, sex, activity } = ctx.session;
+      const keyboard = new InlineKeyboard()
+        .text("🔻 Схуднення", "lose")
+        .text("⚖️ Підтримка", "maintain")
+        .row()
+        .text("🔺 Набір маси", "gain");
 
-      if (weight && height && age && sex && activity) {
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText(
+        "<b>Яка ваша ціль?</b>",
+        { reply_markup: keyboard, parse_mode: "HTML" }
+      );
+    }
+  } else if (ctx.session.step === "goal") {
+    if (["lose", "maintain", "gain"].includes(data)) {
+      ctx.session.goal = data as Goal;
+
+      const { weight, height, age, sex, activity, goal } = ctx.session;
+
+      if (weight && height && age && sex && activity && goal) {
         const bmr = calculateBMR(weight, height, age, sex);
         const tdee = calculateTDEE(bmr, activity);
 
@@ -326,11 +417,13 @@ bot.on("callback_query:data", async (ctx) => {
           activity_level: activity,
           bmr,
           tdee,
+          goal,
         });
 
         await ctx.answerCallbackQuery();
         await ctx.editMessageText(
           `🎉 <b>Профіль успішно налаштовано!</b>\n\n` +
+            `🔹 Ціль: <b>${goalLabels[goal]}</b>\n` +
             `🔹 BMR (Базальний метаболізм): <b>${bmr.toFixed(0)} ккал</b>\n` +
             `🔹 TDEE (Денна норма): <b>${tdee.toFixed(0)} ккал</b>\n\n` +
             `Тепер ви можете додавати прийоми їжі за допомогою кнопки <b>➕ Add meal</b>.`,

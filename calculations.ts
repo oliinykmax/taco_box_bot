@@ -39,3 +39,20 @@ export function calculateTDEE(bmr: number, activity: ActivityLevel): number {
   const multiplier = activityMultipliers[activity];
   return bmr * multiplier;
 }
+
+export type Goal = "lose" | "maintain" | "gain";
+
+/**
+ * Calculates recommended calories based on TDEE and Goal.
+ * lose → -400 kcal
+ * maintain → 0 kcal
+ * gain → +300 kcal
+ */
+export function calculateRecommendedCalories(tdee: number, goal: Goal): number {
+  const adjustments: Record<Goal, number> = {
+    lose: -400,
+    maintain: 0,
+    gain: 300
+  };
+  return tdee + adjustments[goal];
+}

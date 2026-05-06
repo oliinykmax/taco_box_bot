@@ -92,6 +92,32 @@ export async function estimateCalories(mealText: string): Promise<MealEstimation
   return result;
 }
 
+export async function getMealIdeas(goal: string, calories: number): Promise<string> {
+  if (!apiKey) {
+    return "Не вдалося отримати ідеї страв.";
+  }
+
+  const prompt = `
+    Generate 3 simple and healthy meal ideas for a person whose goal is "${goal}" 
+    and target daily intake is ${calories} kcal.
+    
+    Requirements:
+    1. Short and clear names of dishes.
+    2. No medical advice.
+    3. Output as a simple bulleted list in Ukrainian.
+    4. Keep it concise.
+  `;
+
+  try {
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return response.text().trim();
+  } catch (error) {
+    console.error("[Gemini] Error generating meal ideas:", error);
+    return "Не вдалося згенерувати ідеї страв.";
+  }
+}
+
 // Оновлений тест
 export async function testGemini() {
   try {

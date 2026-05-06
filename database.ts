@@ -38,6 +38,7 @@ export function initDB() {
     { table: "users", column: "activity_level", type: "TEXT" },
     { table: "users", column: "bmr", type: "REAL" },
     { table: "users", column: "tdee", type: "REAL" },
+    { table: "users", column: "goal", type: "TEXT" },
     { table: "meals", column: "user_id", type: "INTEGER" },
     { table: "meals", column: "raw_text", type: "TEXT" },
     { table: "meals", column: "calories_estimated", type: "REAL" },
@@ -67,10 +68,11 @@ export function saveUser(user: {
   activity_level: string;
   bmr: number;
   tdee: number;
+  goal?: string;
 }) {
   db.run(
-    `INSERT OR REPLACE INTO users (telegram_id, age, weight, height, sex, activity_level, bmr, tdee)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO users (telegram_id, age, weight, height, sex, activity_level, bmr, tdee, goal)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       user.telegram_id,
       user.age,
@@ -80,6 +82,7 @@ export function saveUser(user: {
       user.activity_level,
       user.bmr,
       user.tdee,
+      user.goal || null,
     ]
   );
 }
@@ -95,6 +98,7 @@ export function getUser(telegram_id: number) {
     activity_level: string;
     bmr: number;
     tdee: number;
+    goal: string | null;
   } | null;
 }
 
